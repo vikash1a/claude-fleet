@@ -1,0 +1,60 @@
+{
+  "name": "claude-fleet",
+  "displayName": "Claude Fleet",
+  "description": "Monitor and manage multiple Claude Code sessions",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-fleet",
+          "title": "Claude Fleet",
+          "icon": "media/fleet.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-fleet": [
+        {
+          "type": "webview",
+          "id": "claudeFleet.sidebar",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeFleet.newSession",
+        "title": "New Claude Session",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeFleet.newSession",
+          "when": "view == claudeFleet.sidebar",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "dev": "node esbuild.mjs --watch",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@claude-fleet/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}
