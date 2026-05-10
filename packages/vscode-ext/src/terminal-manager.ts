@@ -64,7 +64,8 @@ export class TerminalManager {
     })
   }
 
-  // Resume a needs-resume session with `claude --continue`.
+  // Resume a needs-resume session with `claude --resume <sessionId>`.
+  // Uses the exact session ID so two sessions in the same folder are unambiguous.
   resumeSession(sessionId: string, cwd: string): void {
     const term = vscode.window.createTerminal({
       name: `claude · ${cwd.split('/').pop()}`,
@@ -72,7 +73,7 @@ export class TerminalManager {
     })
     this.terminals.set(sessionId, term)
     term.show(true)
-    setTimeout(() => term.sendText('claude --continue'), 500)
+    setTimeout(() => term.sendText(`claude --resume ${sessionId}`), 500)
   }
 
   // Spawn a brand-new session with a goal.
