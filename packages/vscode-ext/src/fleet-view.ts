@@ -21,7 +21,7 @@ export class FleetView implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(msg => {
       switch (msg.type) {
         case 'open':
-          this.terminalManager.focusSession(msg.sessionId)
+          this.terminalManager.focusSession(msg.sessionId, msg.cwd)
           break
         case 'resume':
           this.terminalManager.resumeSession(msg.sessionId, msg.cwd)
