@@ -20,9 +20,13 @@ interface JsonlEntry {
     role?: string
     content?: unknown
     stop_reason?: string       // 'end_turn' | 'tool_use'
-    usage?: Record<string, number>
+    usage?: {                  // usage lives inside message, not at top level
+      input_tokens?: number
+      output_tokens?: number
+      cache_read_input_tokens?: number
+      cache_creation_input_tokens?: number
+    }
   }
-  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
 }
 
 export class SessionRegistry extends EventEmitter {
@@ -158,13 +162,14 @@ export class SessionRegistry extends EventEmitter {
         lastUserTs = new Date(entry.timestamp)
       }
 
-      // Token usage — sum all usage entries
-      if (entry.usage) {
+      // Token usage lives inside message.usage on assistant entries
+      if (entry.type === 'assistant' && entry.message?.usage) {
+        const u = entry.message.usage
         totalTokens +=
-          (entry.usage.input_tokens ?? 0) +
-          (entry.usage.output_tokens ?? 0) +
-          (entry.usage.cache_read_input_tokens ?? 0) +
-          (entry.usage.cache_creation_input_tokens ?? 0)
+          (u.input_tokens ?? 0) +
+          (u.output_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0)
       }
     }
 
