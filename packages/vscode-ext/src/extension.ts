@@ -18,8 +18,12 @@ export function activate(context: vscode.ExtensionContext): void {
     terminalManager.registerDisposeHandler(),
   )
 
-  // Broadcast session changes to the webview
-  registry.on('session:added',   () => fleetView.update(registry.getSessions()))
+  // Broadcast session changes to the webview.
+  // On session:added also try to link a pending spawned terminal to the real session id.
+  registry.on('session:added', (session) => {
+    terminalManager.linkSession(session.id, session.cwd, session.goal)
+    fleetView.update(registry.getSessions())
+  })
   registry.on('session:updated', () => fleetView.update(registry.getSessions()))
   registry.on('session:removed', () => fleetView.update(registry.getSessions()))
 
