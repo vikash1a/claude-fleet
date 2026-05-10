@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
-import { readdir, readFile, watch } from 'fs/promises'
-import { existsSync, FSWatcher } from 'fs'
-import { join, basename } from 'path'
+import { readdir, readFile } from 'fs/promises'
+import { existsSync } from 'fs'
+import { join } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import type { ClaudeSession, SessionStatus } from './types.js'
@@ -9,20 +9,24 @@ import type { ClaudeSession, SessionStatus } from './types.js'
 const execFileAsync = promisify(execFile)
 const PROJECTS_DIR = join(process.env.HOME ?? '/', '.claude', 'projects')
 
-// Each JSONL line from Claude Code looks like this (relevant fields only)
 interface JsonlEntry {
+  type?: string
   sessionId?: string
   cwd?: string
-  type?: string
-  message?: { role?: string; content?: unknown }
   timestamp?: string
-  costUSD?: number
-  usage?: { input_tokens?: number; output_tokens?: number }
+  isMeta?: boolean
+  lastPrompt?: string          // present on 'last-prompt' entries — written when claude exits
+  message?: {
+    role?: string
+    content?: unknown
+    stop_reason?: string       // 'end_turn' | 'tool_use'
+    usage?: Record<string, number>
+  }
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
 }
 
 export class SessionRegistry extends EventEmitter {
   private sessions = new Map<string, ClaudeSession>()
-  private watchers: FSWatcher[] = []
   private pollTimer?: NodeJS.Timeout
 
   getSessions(): ClaudeSession[] {
@@ -37,14 +41,11 @@ export class SessionRegistry extends EventEmitter {
 
   async start(): Promise<void> {
     await this.refresh()
-    // Poll every 5s — simple and reliable
     this.pollTimer = setInterval(() => this.refresh(), 5000)
   }
 
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer)
-    for (const w of this.watchers) { try { w.close() } catch {} }
-    this.watchers = []
   }
 
   private async refresh(): Promise<void> {
@@ -80,7 +81,10 @@ export class SessionRegistry extends EventEmitter {
 
           if (!existing) {
             this.emit('session:added', session)
-          } else if (existing.status !== session.status || existing.lastActivity.getTime() !== session.lastActivity.getTime()) {
+          } else if (
+            existing.status !== session.status ||
+            existing.lastActivity.getTime() !== session.lastActivity.getTime()
+          ) {
             this.emit('session:updated', session)
           }
         } catch {
@@ -89,7 +93,6 @@ export class SessionRegistry extends EventEmitter {
       }
     }
 
-    // Remove sessions whose files are gone
     for (const [id] of this.sessions) {
       if (!seen.has(id)) {
         const session = this.sessions.get(id)!
@@ -112,38 +115,56 @@ export class SessionRegistry extends EventEmitter {
     let totalTokens = 0
     let lastAssistantTs: Date | undefined
     let lastUserTs: Date | undefined
+    let hasExited = false      // true when a 'last-prompt' entry is found
+    let lastStopReason: string | undefined
 
     for (const line of lines) {
       let entry: JsonlEntry
       try { entry = JSON.parse(line) } catch { continue }
 
+      // Session metadata
       if (entry.sessionId) sessionId = entry.sessionId
       if (entry.cwd) cwd = entry.cwd
+
+      // Timestamps — track earliest (startedAt) and latest (lastActivity)
       if (entry.timestamp) {
         const ts = new Date(entry.timestamp)
         if (!startedAt || ts < startedAt) startedAt = ts
         if (!lastActivity || ts > lastActivity) lastActivity = ts
       }
 
-      // First user message = goal
-      if (!goal && entry.message?.role === 'user') {
-        const content = entry.message.content
-        if (typeof content === 'string') goal = content.slice(0, 120)
-        else if (Array.isArray(content)) {
-          const text = content.find((c: any) => c.type === 'text')?.text
-          if (text) goal = String(text).slice(0, 120)
+      // 'last-prompt' is written by Claude Code when it exits cleanly
+      if (entry.type === 'last-prompt') {
+        hasExited = true
+      }
+
+      // First real user message = the goal
+      if (!goal && entry.type === 'user' && !entry.isMeta) {
+        const content = entry.message?.content
+        if (typeof content === 'string') {
+          goal = content.trim().slice(0, 120)
+        } else if (Array.isArray(content)) {
+          const textBlock = content.find((c: any) => c.type === 'text')
+          if (textBlock) goal = String(textBlock.text).trim().slice(0, 120)
         }
       }
 
-      if (entry.message?.role === 'assistant' && entry.timestamp) {
+      // Track last assistant / last user timestamps for needs-resume detection
+      if (entry.type === 'assistant' && entry.timestamp) {
         lastAssistantTs = new Date(entry.timestamp)
+        lastStopReason = entry.message?.stop_reason
       }
-      if (entry.message?.role === 'user' && entry.timestamp) {
+      if (entry.type === 'user' && !entry.isMeta && entry.timestamp) {
         lastUserTs = new Date(entry.timestamp)
       }
 
+      // Token usage — sum all usage entries
       if (entry.usage) {
-        totalTokens += (entry.usage.input_tokens ?? 0) + (entry.usage.output_tokens ?? 0)
+        totalTokens +=
+          (entry.usage.input_tokens ?? 0) +
+          (entry.usage.output_tokens ?? 0) +
+          (entry.usage.cache_read_input_tokens ?? 0) +
+          (entry.usage.cache_creation_input_tokens ?? 0)
       }
     }
 
@@ -152,7 +173,7 @@ export class SessionRegistry extends EventEmitter {
     startedAt    = startedAt    ?? new Date(0)
     lastActivity = lastActivity ?? new Date(0)
 
-    const status = this.deriveStatus(lastAssistantTs, lastUserTs, lastActivity)
+    const status = this.deriveStatus({ hasExited, lastAssistantTs, lastUserTs, lastActivity, lastStopReason })
     const gitBranch = await this.getGitBranch(cwd)
 
     return {
@@ -167,25 +188,46 @@ export class SessionRegistry extends EventEmitter {
     }
   }
 
-  private deriveStatus(
-    lastAssistant: Date | undefined,
-    lastUser: Date | undefined,
+  private deriveStatus(opts: {
+    hasExited: boolean
+    lastAssistantTs: Date | undefined
+    lastUserTs: Date | undefined
     lastActivity: Date
-  ): SessionStatus {
-    const now = Date.now()
-    const idleMs = now - lastActivity.getTime()
+    lastStopReason: string | undefined
+  }): SessionStatus {
+    const { hasExited, lastAssistantTs, lastUserTs, lastActivity, lastStopReason } = opts
+    const idleMs = Date.now() - lastActivity.getTime()
     const idleMinutes = idleMs / 60_000
 
-    // If last activity is very recent (< 2 min), likely active
+    // ── Session has exited (last-prompt entry present) ────────────────────────
+    if (hasExited) {
+      // User sent a message that was never answered → needs to be resumed
+      if (lastUserTs && (!lastAssistantTs || lastUserTs > lastAssistantTs)) {
+        return 'needs-resume'
+      }
+      return 'completed'
+    }
+
+    // ── Session has not exited (still running or crashed without writing last-prompt) ──
+
+    // Very recent activity → actively processing
     if (idleMinutes < 2) return 'active'
 
-    // If last message was from user and no assistant reply came after → needs-resume
-    if (lastUser && lastAssistant && lastUser > lastAssistant) return 'needs-resume'
+    // Last assistant message ended with tool_use → still mid-turn, just slow
+    if (lastStopReason === 'tool_use' && idleMinutes < 10) return 'active'
 
-    // Idle: assistant replied but nothing in last 10 min
-    if (idleMinutes < 60) return 'idle'
+    // User sent a message with no assistant reply after it → waiting / interrupted
+    if (lastUserTs && (!lastAssistantTs || lastUserTs > lastAssistantTs)) {
+      // If recent, claude is probably still thinking
+      if (idleMinutes < 5) return 'active'
+      // If it's been a while with no reply, likely crashed without writing last-prompt
+      return 'needs-resume'
+    }
 
-    // Dead: nothing for over an hour
+    // Assistant replied, session is quiet
+    if (idleMinutes < 30) return 'idle'
+
+    // Very old with no exit marker → crashed long ago
     return 'dead'
   }
 

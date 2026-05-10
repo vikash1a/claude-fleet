@@ -279,7 +279,7 @@ export class FleetView implements vscode.WebviewViewProvider {
   function sessionHtml(s) {
     const repo = s.cwd.split('/').pop() || s.cwd
     const branch = s.gitBranch ? ' · ' + s.gitBranch : ''
-    const tokens = s.tokenUsage ? ' · ' + Math.round(s.tokenUsage / 1000) + 'k tok' : ''
+    const tokens = s.tokenUsage ? ' · ' + fmtTokens(s.tokenUsage) : ''
     const age = timeAgo(s.lastActivity)
 
     let btnHtml = ''
@@ -317,6 +317,12 @@ export class FleetView implements vscode.WebviewViewProvider {
     return Math.floor(diff/86400000) + 'd ago'
   }
 
+  function fmtTokens(n) {
+    if (n >= 1000000) return (n/1000000).toFixed(1) + 'M tok'
+    if (n >= 1000) return Math.round(n/1000) + 'k tok'
+    return n + ' tok'
+  }
+
   function saveState() {
     vscode.setState({ groupBy, collapsed })
   }
@@ -324,6 +330,9 @@ export class FleetView implements vscode.WebviewViewProvider {
   window.addEventListener('message', ({ data }) => {
     if (data.type === 'update') { sessions = data.sessions; render() }
   })
+
+  // Refresh timestamps every 30s without a full re-render from the server
+  setInterval(() => render(), 30000)
 
   render()
 </script>
