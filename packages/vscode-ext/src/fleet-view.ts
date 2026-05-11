@@ -29,9 +29,9 @@ export class FleetView implements vscode.WebviewViewProvider {
     })
   }
 
-  update(sessions: ClaudeSession[]): void {
+  update(sessions: ClaudeSession[], hasTerminal: (id: string) => boolean): void {
     if (!this.view) return
-    this.view.webview.postMessage({ type: 'update', sessions: sessions.map(serialize) })
+    this.view.webview.postMessage({ type: 'update', sessions: sessions.map(s => serialize(s, hasTerminal(s.id))) })
   }
 
   private getHtml(initial: ClaudeSession[]): string {
@@ -145,7 +145,6 @@ export class FleetView implements vscode.WebviewViewProvider {
     border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, rgba(255,255,255,.04));
   }
   .session:hover { background: var(--vscode-list-hoverBackground); }
-  .session:hover .action-btn { opacity: 1; }
 
   /* Row 1: goal + action button */
   .session-row1 {
@@ -170,8 +169,6 @@ export class FleetView implements vscode.WebviewViewProvider {
     border-radius: 3px;
     cursor: pointer;
     border: 1px solid var(--vscode-button-border, transparent);
-    opacity: 0;
-    transition: opacity .1s;
     white-space: nowrap;
   }
   .action-btn.primary {
@@ -340,18 +337,12 @@ export class FleetView implements vscode.WebviewViewProvider {
     const dur    = duration(s.startedAt, s.lastActivity)
 
     // Action button — top right, visible on hover
-    let action = '', actionClass = 'secondary'
-    if (s.status === 'active' || s.status === 'idle') {
-      action = 'Focus'; actionClass = 'primary'
-    } else if (s.status === 'needs-resume') {
-      action = 'Resume'; actionClass = 'primary'
-    } else {
-      action = 'Open Folder'
-    }
-    const actionType = s.status==='active'||s.status==='idle' ? 'open'
-                     : s.status==='needs-resume' ? 'resume' : 'openFolder'
-
-    const btn = \`<button class="action-btn \${actionClass}" data-action="\${actionType}" data-sid="\${esc(s.id)}">\${action}</button>\`
+    // Two options only:
+    //   terminal in map → Focus
+    //   no terminal   → Resume (all statuses)
+    const btn = s.hasTerminal
+      ? \`<button class="action-btn primary" data-action="open"   data-sid="\${esc(s.id)}">Focus</button>\`
+      : \`<button class="action-btn secondary" data-action="resume" data-sid="\${esc(s.id)}">Resume</button>\`
 
     // Status chip only for states that need attention
     let statusChip = ''
@@ -411,7 +402,7 @@ export class FleetView implements vscode.WebviewViewProvider {
   }
 }
 
-function serialize(s: ClaudeSession) {
+function serialize(s: ClaudeSession, hasTerminal: boolean) {
   return {
     id: s.id,
     goal: s.goal,
@@ -421,5 +412,6 @@ function serialize(s: ClaudeSession) {
     lastActivity: s.lastActivity.getTime(),
     startedAt: s.startedAt.getTime(),
     tokenUsage: s.tokenUsage ?? null,
+    hasTerminal,
   }
 }

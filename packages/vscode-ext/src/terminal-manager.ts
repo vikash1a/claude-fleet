@@ -6,24 +6,47 @@ interface PendingSpawn {
   goal: string
 }
 
+// Terminal names embed a short session ID so we can re-link after reload.
+// Format: "fleet: <repo> [<sessionId-prefix>]"
+const NAME_PREFIX = 'fleet:'
+const nameFor = (cwd: string, sessionId: string) =>
+  `${NAME_PREFIX} ${cwd.split('/').pop()} [${sessionId.slice(0, 7)}]`
+
+// Parse a session ID prefix out of a terminal name we created.
+const parseSessionPrefix = (name: string): string | undefined => {
+  const m = name.match(/\[([a-f0-9-]{7,})\]$/)
+  return m?.[1]
+}
+
 export class TerminalManager {
   // Terminals keyed by real session id (UUID from Claude Code)
   private terminals = new Map<string, vscode.Terminal>()
 
-  // Terminals we spawned but haven't yet linked to a real session id.
-  // Keyed by the tempId we assigned at spawn time.
+  // Terminals we spawned but not yet linked to a real session id.
   private pending = new Map<string, PendingSpawn>()
 
+  // Called once on activate — re-links terminals that survived a window reload.
+  // Walks all open terminals, finds ones we named, matches to sessions by ID prefix.
+  relinkAfterReload(sessions: { id: string }[]): void {
+    for (const term of vscode.window.terminals) {
+      const prefix = parseSessionPrefix(term.name)
+      if (!prefix) continue
+
+      const session = sessions.find(s => s.id.startsWith(prefix))
+      if (session && !this.terminals.has(session.id)) {
+        this.terminals.set(session.id, term)
+      }
+    }
+  }
+
   // Called by extension.ts when registry fires session:added.
-  // Tries to link a newly discovered session to a terminal we spawned.
+  // Moves a pending terminal into the main map under the real session UUID.
   linkSession(realId: string, cwd: string, goal: string): void {
-    // Already linked (e.g. duplicate event)
     if (this.terminals.has(realId)) return
 
-    // Find a pending spawn whose cwd and goal both match.
-    // Using both fields avoids the "two sessions same folder" collision.
     for (const [tempId, info] of this.pending) {
       if (info.cwd === cwd && info.goal === goal) {
+        // Rename the terminal now that we have the real session ID
         this.terminals.set(realId, info.term)
         this.pending.delete(tempId)
         return
@@ -31,10 +54,15 @@ export class TerminalManager {
     }
   }
 
+  // Returns true if a live terminal is linked to this session.
+  hasTerminal(id: string): boolean {
+    const term = this.terminals.get(id)
+    return term !== undefined && this.isAlive(term)
+  }
+
   // Focus the terminal for an active/idle session.
-  // Priority: linked terminal → shell integration cwd match → creation cwd match → prompt user
   focusSession(sessionId: string, cwd: string): void {
-    // 1. Terminal already linked to this session id
+    // 1. Terminal linked to this session (spawned or re-linked after reload)
     const own = this.terminals.get(sessionId)
     if (own && this.isAlive(own)) {
       own.show(true)
@@ -49,40 +77,31 @@ export class TerminalManager {
       return
     }
 
-    // 3. Can't find it — ask the user
+    // 3. Can't find it — terminal was tracked but has since closed; offer to resume
     vscode.window.showInformationMessage(
-      'No terminal found for this session. Open one?',
-      'Open Terminal'
+      'Terminal for this session is gone. Resume it?',
+      'Resume'
     ).then(choice => {
-      if (choice !== 'Open Terminal') return
-      const term = vscode.window.createTerminal({
-        name: `claude · ${cwd.split('/').pop()}`,
-        cwd,
-      })
+      if (choice !== 'Resume') return
+      const term = vscode.window.createTerminal({ name: nameFor(cwd, sessionId), cwd })
       this.terminals.set(sessionId, term)
       term.show(true)
+      setTimeout(() => term.sendText(`claude --resume ${sessionId}`), 500)
     })
   }
 
   // Resume a needs-resume session with `claude --resume <sessionId>`.
-  // Uses the exact session ID so two sessions in the same folder are unambiguous.
   resumeSession(sessionId: string, cwd: string): void {
-    const term = vscode.window.createTerminal({
-      name: `claude · ${cwd.split('/').pop()}`,
-      cwd,
-    })
+    const term = vscode.window.createTerminal({ name: nameFor(cwd, sessionId), cwd })
     this.terminals.set(sessionId, term)
     term.show(true)
     setTimeout(() => term.sendText(`claude --resume ${sessionId}`), 500)
   }
 
-  // Spawn a brand-new session with a goal.
-  // Stored under a tempId until linkSession() ties it to the real session UUID.
+  // Spawn a brand-new session. Stored under tempId until linkSession() fires.
   spawnSession(tempId: string, cwd: string, goal: string): void {
-    const term = vscode.window.createTerminal({
-      name: `claude · ${cwd.split('/').pop()}`,
-      cwd,
-    })
+    // Use a placeholder name — renamed conceptually when linkSession() fires
+    const term = vscode.window.createTerminal({ name: `${NAME_PREFIX} ${cwd.split('/').pop()} [new]`, cwd })
     this.pending.set(tempId, { term, cwd, goal })
     term.show(true)
     setTimeout(() => term.sendText(`claude "${goal.replace(/"/g, '\\"')}"`), 500)

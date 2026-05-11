@@ -46,18 +46,20 @@ export function activate(context: vscode.ExtensionContext): void {
     terminalManager.registerDisposeHandler(),
   )
 
+  const hasTerminal = (id: string) => terminalManager.hasTerminal(id)
+
   // Broadcast session changes to the webview + update status bar
   registry.on('session:added', (session) => {
     terminalManager.linkSession(session.id, session.cwd, session.goal)
-    fleetView.update(registry.getSessions())
+    fleetView.update(registry.getSessions(), hasTerminal)
     updateStatusBar()
   })
   registry.on('session:updated', () => {
-    fleetView.update(registry.getSessions())
+    fleetView.update(registry.getSessions(), hasTerminal)
     updateStatusBar()
   })
   registry.on('session:removed', () => {
-    fleetView.update(registry.getSessions())
+    fleetView.update(registry.getSessions(), hasTerminal)
     updateStatusBar()
   })
 
@@ -113,7 +115,13 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   )
 
-  registry.start().then(() => updateStatusBar())
+  registry.start().then(() => {
+    // Re-link terminals that survived the window reload by scanning their names,
+    // then push a fresh update so the webview reflects correct hasTerminal state.
+    terminalManager.relinkAfterReload(registry.getSessions())
+    fleetView.update(registry.getSessions(), hasTerminal)
+    updateStatusBar()
+  })
   context.subscriptions.push({ dispose: () => { registry.stop(); terminalManager.dispose() } })
 }
 
